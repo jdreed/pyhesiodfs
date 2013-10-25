@@ -23,7 +23,7 @@ import io
 import pwd
 from collections import defaultdict
 
-import hesiod
+import locker
 
 CONFIG_FILE = '/etc/pyhesiodfs/config.ini'
 ATTACHTAB_PATH='/.attachtab'
@@ -224,29 +224,26 @@ class PyHesiodFS(Fuse):
             return self.mounts[self._uid()][name]
         else:
             try:
-                filsys = hesiod.FilsysLookup(name)
-            except IOError, e:
-                if e.errno in (errno.ENOENT, errno.EMSGSIZE):
-                    raise IOError(errno.ENOENT, os.strerror(errno.ENOENT))
-                else:
-                    raise IOError(errno.EIO, os.strerror(errno.EIO))
-            # FIXME check if the first locker is valid
-            if len(filsys.filsys) >= 1:
-                pointers = filsys.filsys
-                pointer = pointers[0]
-                if pointer['type'] == 'AFS' or pointer['type'] == 'LOC':
-                    self.mounts[self._uid()][name] = pointer['location']
-                    syslog(LOG_INFO, "Mounting "+name+" on "+pointer['location'])
-                    return pointer['location']
-                elif pointer['type'] == 'ERR':
-                    syslog(LOG_NOTICE, "ERR for locker %s: %s" % (name, pointer['message'], ))
-                    return None
-                else:
-                    syslog(LOG_NOTICE, "Unknown locker type "+pointer['type']+" for locker "+name+" ("+repr(pointer)+" )")
-                    return None
-            else:
-                syslog(LOG_WARNING, "Couldn't find filsys for "+name)
+                lockers = locker.lookup(name)
+            except locker.LockerNotFoundError as e:
+                if self.syslog_unknown:
+                    syslog(LOG_NOTICE, str(e))
                 return None
+            except locker.LockerUnavailableError as e:
+                if self.syslog_unavail:
+                    syslog(LOG_NOTICE, str(e))
+                return None
+            except locker.LockerError as e:
+                syslog(LOG_WARNING, str(e))
+                return None
+            # FIXME check if the first locker is valid
+            for l in lockers:
+                if l.attachable():
+                    self.mounts[self._uid()][name] = l.path
+                    syslog(LOG_INFO, "Mounting "+name+" on "+l.path)
+                    return l.path
+            syslog(LOG_WARNING, "Lookup succeeded for %s but no lockers could be attached." % (name))
+        return None
 
     def getdir(self, path):
         return [(i, 0) for i in (['.', '..'] + [x[1:] for x in self.ro_files.keys()] + self.getCachedLockers())]
