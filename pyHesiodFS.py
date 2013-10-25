@@ -82,6 +82,29 @@ def _pwnam(uid):
     except:
         return str(uid)
 
+class attachtab(defaultdict):
+    def __init__(self):
+        super(attachtab, self).__init__(dict)
+
+    def __str__(self):
+        at = defaultdict(list)
+        rv = ''
+        for uid in self:
+            for locker in self[uid]:
+                at[locker].append(_pwnam(uid))
+        for e in at:
+            if e:
+                rv += "%-23s %-23s %-19s %s\n" % (e, '/mit/' + e,
+                                                  attachtab._listPrint(at[e]), 'nosuid')
+        return rv
+
+    @staticmethod
+    def _listPrint(l):
+        return "%s%s%s" % ('{' if len(l) > 1 else '',
+                           ','.join(l),
+                           '}' if len(l) > 1 else '')
+
+
 class negcache(dict):
     """
     A set-like object that automatically expunges entries after
@@ -143,7 +166,7 @@ class PyHesiodFS(Fuse):
             self.fuse_args.add("noapplexattr", True)
             self.fuse_args.add("volname", "MIT")
             self.fuse_args.add("fsname", "pyHesiodFS")
-        self.mounts = defaultdict(dict)
+        self.mounts = attachtab()
         
         # Dictionary of fake read-only file paths and their contents
         self.ro_files = {}
@@ -179,7 +202,7 @@ class PyHesiodFS(Fuse):
             readme_contents += "\n"
 
         if self.show_attachtab:
-            self.ro_files[ATTACHTAB_PATH] = self.getAttachtab
+            self.ro_files[ATTACHTAB_PATH] = self.mounts.__str__
 
         if self.show_readme:
             self.ro_files[readme_path] = readme_contents
@@ -227,21 +250,6 @@ class PyHesiodFS(Fuse):
 
     def getCachedLockers(self):
         return self.mounts[self._uid()].keys()
-
-    def getAttachtab(self):
-        attachtab = defaultdict(list)
-        rv = ''
-        for uid in self.mounts:
-            for locker in self.mounts[uid]:
-                attachtab[locker].append(uid)
-        for l in attachtab:
-            people = [_pwnam(x) for x in attachtab[l]]
-            if people:
-                rv += "%-23s %-23s %-19s %s\n" % (l, '/mit/' + l,
-                                                  "%s%s%s" % ('{' if len(people) > 1 else '',
-                                                              ','.join(people),
-                                                              '}' if len(people) > 1 else ''), 'nosuid')
-        return rv
 
     def findLocker(self, name):
         """Lookup a locker in hesiod and return its path"""
