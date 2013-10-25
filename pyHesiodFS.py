@@ -209,6 +209,10 @@ class PyHesiodFS(Fuse):
             st.st_mode = stat.S_IFREG | 0444
             st.st_nlink = 1
             st.st_size = len(self._get_file_contents(path))
+        elif path.startswith('/.'):
+            # Avoid spurious Hesiod errors by not even bothering
+            # to lookup things beginning with '.'
+            return -errno.ENOENT
         elif '/' not in path[1:]:
             if path[1:] not in self.negcache[self._uid()] and self.findLocker(path[1:]):
                 st.st_mode = stat.S_IFLNK | 0777
