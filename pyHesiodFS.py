@@ -199,21 +199,23 @@ class PyHesiodFS(Fuse):
         self.show_attachtab = config.getboolean('PyHesiodFS', 'show_attachtab')
         self.show_readme = config.getboolean('PyHesiodFS', 'show_readme')
 
-        mountpoint = self.fuse_args.mountpoint
-        # The args should be parsed at this point.
-        assert mountpoint is not None
         readme_filename = config.get('PyHesiodFS', 'readme_filename')
         if len(readme_filename) < 1 or '/' in readme_filename:
             syslog(LOG_WARNING, "Invalid value for 'readme_filename' in config file, disabling readme file")
             self.show_readme = False
         # Add the leading slash
         readme_path = '/' + readme_filename
-        readme_contents = config.get('PyHesiodFS', 'readme_contents') % {'mountpoint': mountpoint,
-                                                                         'blank': ''}
-        # Add a newline if the "file" doesn't end in it
-        if readme_contents[-1] != "\n":
-            readme_contents += "\n"
+        readme_contents = config.get('PyHesiodFS', 'readme_contents')
+        try:
+            readme_contents = readme_contents % {'mountpoint': self.mountpoint,
+                                                 'blank': ''}
+        except KeyError as e:
+            syslog(LOG_WARNING, "Unknown substitution key (%s) in readme_contents in config file, disabling readme file" % (e.message,))
+            self.show_readme = False
 
+        # Add a newline if the "file" doesn't end in it
+        if not readme_contents.endswith("\n"):
+            readme_contents += "\n"
         if self.show_attachtab:
             self.ro_files[ATTACHTAB_PATH] = self.mounts._legacyFormat
 
