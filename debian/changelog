@@ -1,3 +1,13 @@
+debathena-pyhesiodfs (1.0-0debathena1) unstable; urgency=low
+
+  * New upstream release (Trac: #766)
+  * pyhesiodfs now supports a config file
+  * pyhesiodfs no longer logs every symlink creation (Trac: #355)
+  * pyhesiodfs has basic "attachtab" support for an upcoming liblocker
+    rewrite
+
+ -- Jonathan Reed <jdreed@mit.edu>  Mon, 28 Oct 2013 14:45:38 -0400
+
 debathena-pyhesiodfs (0.0.r167-0debathena13) unstable; urgency=low
 
   * Re-factor all our existing patches into the mainline code, as we are
