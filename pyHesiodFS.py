@@ -1,6 +1,7 @@
 #!/usr/bin/python2.5
 
 #    pyHesiodFS:
+#    Copyright (c) 2013  Massachusetts Institute of Technology
 #    Copyright (C) 2007  Quentin Smith <quentin@mit.edu>
 #    "Hello World" pyFUSE example:
 #    Copyright (C) 2006  Andrew Straw  <strawman@astraw.com>
@@ -13,8 +14,45 @@ import sys, os, stat, errno, time
 from syslog import *
 import fuse
 from fuse import Fuse
+import ConfigParser
+import io
+import pwd
 
 import hesiod
+
+CONFIG_FILE = '/etc/pyhesiodfs/config.ini'
+ATTACHTAB_PATH='/.attachtab'
+CONFIG_DEFAULT = """
+[PyHesiodFS]
+# Show a "README"-esque file in the filesystem
+show_readme = false
+
+# Filename (omit the leading slash)
+readme_filename = README.txt
+
+# This is a multi-line string.  Each subsequent line must be indented
+# '%(mountpoint)s' will be replaced with the mountpoint of the filesystem
+# '%(blank)s' will be replaced by whitespace
+readme_contents = This is the pyhesiodfs FUSE autmounter.
+ %(blank)s
+ To access a Hesiod filsys, just access %(mountpoint)s/name.
+ %(blank)s
+ If you're using the Finder, try pressing Cmd+Shift+G and then
+ entering %(mountpoint)s/name
+
+show_attachtab = true
+"""
+
+def _pwnam(uid):
+    """
+    Try to convert the supplied uid to a name using the passwd
+    database.  Return the name or, if anything fails, just return the
+    uid as a string.
+    """
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except:
+        return str(uid)
 
 try:
     from collections import defaultdict
@@ -112,10 +150,53 @@ class PyHesiodFS(Fuse):
             self.fuse_args.add("fsname", "pyHesiodFS")
         self.mounts = defaultdict(dict)
         
+        # Dictionary of fake read-only file paths and their contents
+        self.ro_files = {}
+
         # Cache deletions for half a second - should give `ln -nsf`
         # enough time to make a new symlink
         self.negcache = defaultdict(negcache)
     
+    def _initializeConfig(self, config):
+        try:
+            self.show_attachtab = config.getboolean('PyHesiodFS', 'show_attachtab')
+        except ValueError:
+            syslog(LOG_WARNING, "Bad value for 'show_attachtab' in config file, assuming 'True'")
+            self.show_attachtab = True
+
+        try:
+            self.show_readme = config.getboolean('PyHesiodFS', 'show_readme')
+        except ValueError:
+            syslog(LOG_WARNING, "Bad value for 'show_readme' in config file, assuming 'False'")
+            self.show_readme = False
+
+        mountpoint = self.fuse_args.mountpoint
+        # The args should be parsed at this point.
+        assert mountpoint is not None
+        readme_filename = config.get('PyHesiodFS', 'readme_filename')
+        if len(readme_filename) < 1 or '/' in readme_filename:
+            syslog(LOG_WARNING, "Invalid value for 'readme_filename' in config file, disabling readme file")
+            self.show_readme = False
+        # Add the leading slash
+        readme_path = '/' + readme_filename
+        readme_contents = config.get('PyHesiodFS', 'readme_contents') % {'mountpoint': mountpoint,
+                                                                         'blank': ''}
+        # Add a newline if the "file" doesn't end in it
+        if readme_contents[-1] != "\n":
+            readme_contents += "\n"
+
+        if self.show_attachtab:
+            self.ro_files[ATTACHTAB_PATH] = self.getAttachtab
+
+        if self.show_readme:
+            self.ro_files[readme_path] = readme_contents
+
+    def _get_file_contents(self, path):
+        assert path in self.ro_files
+        contents = self.ro_files[path]
+        assert callable(contents) or type(contents) is str
+        return contents() if callable(contents) else contents
+
     def _uid(self):
         return fuse.FuseGetContext()['uid']
     
@@ -131,6 +212,10 @@ class PyHesiodFS(Fuse):
             st.st_mode = stat.S_IFDIR | 0755
             st.st_gid = self._gid()
             st.st_nlink = 2
+        elif path in self.ro_files:
+            st.st_mode = stat.S_IFREG | 0444
+            st.st_nlink = 1
+            st.st_size = len(self._get_file_contents(path))
         elif '/' not in path[1:]:
             if path[1:] not in self.negcache[self._uid()] and self.findLocker(path[1:]):
                 st.st_mode = stat.S_IFLNK | 0777
@@ -148,6 +233,21 @@ class PyHesiodFS(Fuse):
 
     def getCachedLockers(self):
         return self.mounts[self._uid()].keys()
+
+    def getAttachtab(self):
+        attachtab = defaultdict(list)
+        rv = ''
+        for uid in self.mounts:
+            for locker in self.mounts[uid]:
+                attachtab[locker].append(uid)
+        for l in attachtab:
+            people = [_pwnam(x) for x in attachtab[l]]
+            if people:
+                rv += "%-23s %-23s %-19s %s\n" % (l, '/mit/' + l,
+                                                  "%s%s%s" % ('{' if len(people) > 1 else '',
+                                                              ','.join(people),
+                                                              '}' if len(people) > 1 else ''), 'nosuid')
+        return rv
 
     def findLocker(self, name):
         """Lookup a locker in hesiod and return its path"""
@@ -180,7 +280,7 @@ class PyHesiodFS(Fuse):
                 return None
 
     def getdir(self, path):
-        return [(i, 0) for i in (['.', '..'] + self.getCachedLockers())]
+        return [(i, 0) for i in (['.', '..'] + [x[1:] for x in self.ro_files.keys()] + self.getCachedLockers())]
 
     def readdir(self, path, offset):
         for (r, zero) in self.getdir(path):
@@ -189,8 +289,28 @@ class PyHesiodFS(Fuse):
     def readlink(self, path):
         return self.findLocker(path[1:])
 
+    def open(self, path, flags):
+        if path not in self.ro_files:
+            return -errno.ENOENT
+        accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
+        if (flags & accmode) != os.O_RDONLY:
+            return -errno.EACCES
+
+    def read(self, path, size, offset):
+        if path not in self.ro_files:
+            return -errno.ENOENT
+        contents = self._get_file_contents(path)
+        slen = len(contents)
+        if offset < slen:
+            if offset + size > slen:
+                size = slen - offset
+            buf = contents[offset:offset+size]
+        else:
+            buf = ''
+        return buf
+
     def symlink(self, src, path):
-        if path == '/':
+        if path == '/' or path in self.ro_files:
             return -errno.EPERM
         elif '/' not in path[1:]:
             self.mounts[self._uid()][path[1:]] = src
@@ -199,7 +319,7 @@ class PyHesiodFS(Fuse):
             return -errno.EPERM
     
     def unlink(self, path):
-        if path == '/':
+        if path == '/' or path in self.ro_files:
             return -errno.EPERM
         elif '/' not in path[1:]:
             del self.mounts[self._uid()][path[1:]]
@@ -208,6 +328,11 @@ class PyHesiodFS(Fuse):
             return -errno.EPERM
 
 def main():
+    config = ConfigParser.RawConfigParser()
+    # Ensure a "PyHesiodFS" section exists in the config file
+    config.readfp(io.BytesIO(CONFIG_DEFAULT))
+    config.read(CONFIG_FILE)
+
     try:
         usage = Fuse.fusage
         server = PyHesiodFS(version="%prog " + fuse.__version__,
@@ -223,6 +348,7 @@ pyHesiodFS [mountpath] [options]
             sys.argv.pop(1)
         server = PyHesiodFS()
 
+    server._initializeConfig(config)
     try:
         server.main()
     except fuse.FuseError as fe:
