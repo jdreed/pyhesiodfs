@@ -92,16 +92,11 @@ class attachtab(defaultdict):
         return "\n".join(["%s:%s" % (k,v) for k,v in self[self.fusefs._uid()].items()]) + "\n"
 
     def _legacyFormat(self):
-        at = defaultdict(list)
         rv = "%-23s %-23s %-19s %s\n" % ("filesystem", "mountpoint", "user", "mode")
         rv += "%-23s %-23s %-19s %s\n" % ("----------", "----------", "----", "----")
-        for uid in self:
-            for locker in self[uid]:
-                at[locker].append(_pwnam(uid))
-        for e in at:
-            if e:
-                rv += "%-23s %-23s %-19s %s\n" % (e, os.path.join(self.fusefs.mountpoint, e),
-                                                  attachtab._listPrint(at[e]), 'w,nosuid')
+        for locker in self[self.fusefs._uid()]:
+            rv += "%-23s %-23s %-19s %s\n" % (locker, os.path.join(self.fusefs.mountpoint, locker),
+                                              _pwnam(self.fusefs._uid()), 'w,nosuid')
         return rv
 
     @staticmethod
