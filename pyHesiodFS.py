@@ -25,6 +25,8 @@ from collections import defaultdict
 import locker
 
 ATTACHTAB_PATH='/.attachtab'
+ATTACHTAB_USER_PATH='/.attachtab.user'
+
 class PyHesiodFSConfigParser(RawConfigParser):
     """
     A subclass of RawConfigParser that provides a single place to
@@ -83,19 +85,24 @@ def _pwnam(uid):
         return str(uid)
 
 class attachtab(defaultdict):
-    def __init__(self):
+    def __init__(self, fusefs):
         super(attachtab, self).__init__(dict)
+        self.fusefs = fusefs
 
     def __str__(self):
+        return "\n".join(["%s:%s" % (k,v) for k,v in self[self.fusefs._uid()].items()]) + "\n"
+
+    def _legacyFormat(self):
         at = defaultdict(list)
-        rv = ''
+        rv = "%-23s %-23s %-19s %s\n" % ("filesystem", "mountpoint", "user", "mode")
+        rv += "%-23s %-23s %-19s %s\n" % ("----------", "----------", "----", "----")
         for uid in self:
             for locker in self[uid]:
                 at[locker].append(_pwnam(uid))
         for e in at:
             if e:
-                rv += "%-23s %-23s %-19s %s\n" % (e, '/mit/' + e,
-                                                  attachtab._listPrint(at[e]), 'nosuid')
+                rv += "%-23s %-23s %-19s %s\n" % (e, os.path.join(self.fusefs.mountpoint, e),
+                                                  attachtab._listPrint(at[e]), 'w,nosuid')
         return rv
 
     @staticmethod
@@ -166,7 +173,7 @@ class PyHesiodFS(Fuse):
             self.fuse_args.add("noapplexattr", True)
             self.fuse_args.add("volname", "MIT")
             self.fuse_args.add("fsname", "pyHesiodFS")
-        self.mounts = attachtab()
+        self.mounts = attachtab(self)
         
         # Dictionary of fake read-only file paths and their contents
         self.ro_files = {}
@@ -179,6 +186,12 @@ class PyHesiodFS(Fuse):
         # enough time to make a new symlink
         self.negcache = defaultdict(negcache)
     
+    def parse(self, *args, **kwargs):
+        Fuse.parse(self, *args, **kwargs)
+        self.mountpoint = self.fuse_args.mountpoint
+        # Ensure that we know where we're mounted at this point
+        assert self.mountpoint is not None
+
     def _initializeConfig(self, config):
         self.syslog_unavail = config.getboolean('PyHesiodFS', 'syslog_unavail')
         self.syslog_unknown = config.getboolean('PyHesiodFS', 'syslog_unknown')
@@ -202,7 +215,9 @@ class PyHesiodFS(Fuse):
             readme_contents += "\n"
 
         if self.show_attachtab:
-            self.ro_files[ATTACHTAB_PATH] = self.mounts.__str__
+            self.ro_files[ATTACHTAB_PATH] = self.mounts._legacyFormat
+
+        self.ro_files[ATTACHTAB_USER_PATH] = self.mounts.__str__
 
         if self.show_readme:
             self.ro_files[readme_path] = readme_contents
