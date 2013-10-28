@@ -18,35 +18,58 @@ import os, stat, errno, time
 from syslog import *
 import fuse
 from fuse import Fuse
-import ConfigParser
-import io
+from ConfigParser import RawConfigParser
 import pwd
 from collections import defaultdict
 
 import locker
 
-CONFIG_FILE = '/etc/pyhesiodfs/config.ini'
 ATTACHTAB_PATH='/.attachtab'
-CONFIG_DEFAULT = """
-[PyHesiodFS]
-# Show a "README"-esque file in the filesystem
-show_readme = false
+class PyHesiodFSConfigParser(RawConfigParser):
+    """
+    A subclass of RawConfigParser that provides a single place to
+    store defaults, and ensures a section exists, along with
+    per-platform default values for the config file.  Also override
+    getboolean to provide a method that deals with invalid values.
+    """
+    CONFIG_FILES = { 'darwin': '/Library/Preferences/PyHesiodFS.ini',
+                     '_DEFAULT': '/etc/pyhesiodfs/config.ini',
+                     }
 
-# Filename (omit the leading slash)
-readme_filename = README.txt
+    CONFIG_DEFAULTS = { 'show_readme': 'false',
+                        'readme_filename': 'README.txt',
+                        'readme_contents': """
+This is the pyhesiodfs FUSE autmounter.
+%(blank)s
+To access a Hesiod filsys, just access %(mountpoint)s/name.
+%(blank)s
+If you're using the Finder, try pressing Cmd+Shift+G and then
+entering %(mountpoint)s/name
+""",
+                        'show_attachtab': 'true',
+                        'syslog_unavail': 'true',
+                        'syslog_unknown': 'true',
+                        'syslog_success': 'false',
+                        }
 
-# This is a multi-line string.  Each subsequent line must be indented
-# '%(mountpoint)s' will be replaced with the mountpoint of the filesystem
-# '%(blank)s' will be replaced by whitespace
-readme_contents = This is the pyhesiodfs FUSE autmounter.
- %(blank)s
- To access a Hesiod filsys, just access %(mountpoint)s/name.
- %(blank)s
- If you're using the Finder, try pressing Cmd+Shift+G and then
- entering %(mountpoint)s/name
+    def __init__(self):
+        RawConfigParser.__init__(self, defaults=self.CONFIG_DEFAULTS)
+        self.add_section('PyHesiodFS')
+        if sys.platform in self.CONFIG_FILES:
+            self.read(self.CONFIG_FILES[sys.platform])
+        else:
+            self.read(self.CONFIG_FILES['_DEFAULT'])
 
-show_attachtab = true
-"""
+    def getboolean(self, section, option):
+        try:
+            return RawConfigParser.getboolean(self, section, option)
+        except ValueError:
+            rv = RawConfigParser.getboolean(self, 'DEFAULT', option)
+            syslog(LOG_WARNING,
+                   "Invalid boolean value for %s in config file; assuming %s" % (option, rv))
+            return rv
+
+# Helper functions
 
 def _pwnam(uid):
     """
@@ -125,22 +148,20 @@ class PyHesiodFS(Fuse):
         # Dictionary of fake read-only file paths and their contents
         self.ro_files = {}
 
+        self.syslog_unavail = True
+        self.syslog_unknown = True
+        self.syslog_success = False
+
         # Cache deletions for half a second - should give `ln -nsf`
         # enough time to make a new symlink
         self.negcache = defaultdict(negcache)
     
     def _initializeConfig(self, config):
-        try:
-            self.show_attachtab = config.getboolean('PyHesiodFS', 'show_attachtab')
-        except ValueError:
-            syslog(LOG_WARNING, "Bad value for 'show_attachtab' in config file, assuming 'True'")
-            self.show_attachtab = True
-
-        try:
-            self.show_readme = config.getboolean('PyHesiodFS', 'show_readme')
-        except ValueError:
-            syslog(LOG_WARNING, "Bad value for 'show_readme' in config file, assuming 'False'")
-            self.show_readme = False
+        self.syslog_unavail = config.getboolean('PyHesiodFS', 'syslog_unavail')
+        self.syslog_unknown = config.getboolean('PyHesiodFS', 'syslog_unknown')
+        self.syslog_success = config.getboolean('PyHesiodFS', 'syslog_success')
+        self.show_attachtab = config.getboolean('PyHesiodFS', 'show_attachtab')
+        self.show_readme = config.getboolean('PyHesiodFS', 'show_readme')
 
         mountpoint = self.fuse_args.mountpoint
         # The args should be parsed at this point.
@@ -294,10 +315,7 @@ class PyHesiodFS(Fuse):
             return -errno.EPERM
 
 def main():
-    config = ConfigParser.RawConfigParser()
-    # Ensure a "PyHesiodFS" section exists in the config file
-    config.readfp(io.BytesIO(CONFIG_DEFAULT))
-    config.read(CONFIG_FILE)
+    config = PyHesiodFSConfigParser()
 
     usage = Fuse.fusage
     server = PyHesiodFS(version="%prog " + fuse.__version__,
