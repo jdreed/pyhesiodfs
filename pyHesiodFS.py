@@ -303,7 +303,8 @@ class PyHesiodFS(Fuse):
             except locker.LockerError as e:
                 syslog(LOG_WARNING, str(e))
                 return None
-            # FIXME check if the first locker is valid
+            # TODO: Check if the first locker is valid
+            #       See Debathena Trac #583
             for l in lockers:
                 if l.attachable():
                     self.mounts[self._uid()][name] = l.path
