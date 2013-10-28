@@ -24,8 +24,8 @@ from collections import defaultdict
 
 import locker
 
-ATTACHTAB_PATH='/.attachtab'
-ATTACHTAB_USER_PATH='/.attachtab.user'
+LEGACY_ATTACHTAB_PATH='.attachtab.legacy'
+ATTACHTAB_PATH='.attachtab'
 
 class PyHesiodFSConfigParser(RawConfigParser):
     """
@@ -46,8 +46,7 @@ This is the pyhesiodfs FUSE autmounter.
 To access a Hesiod filsys, just access %(mountpoint)s/name.
 %(blank)s
 If you're using the Finder, try pressing Cmd+Shift+G and then
-entering %(mountpoint)s/name
-""",
+entering %(mountpoint)s/name""",
                         'show_attachtab': 'true',
                         'syslog_unavail': 'true',
                         'syslog_unknown': 'true',
@@ -156,6 +155,32 @@ class MyStat(fuse.Stat):
         self.st_mtime = 0
         self.st_ctime = 0
 
+class FakeFiles(dict):
+    """A dict-style object that holds pathnames which behave as fake
+    read-only files, and their contents.  Constraints on the keys and
+    values are enforced by raising ValueError or TypeError.
+    """
+    def __init__(self, path='/'):
+        super(FakeFiles, self).__init__()
+        self.path = path
+
+    def __setitem__(self, k, v):
+        if type(k) is not str:
+            raise TypeError('Filenames must be strings')
+        if type(v) is not str and not callable(v):
+            raise TypeError('File contents must be strings or callable')
+        f = k.strip()
+        if f in ['.', '..', ''] or '/' in f:
+            raise ValueError("Invalid filename: '%s'" % (k,))
+        super(FakeFiles, self).__setitem__(self.path + f,v)
+
+    def filenames(self):
+        return [x[len(self.path):] for x in self]
+
+    def __getitem__(self, k):
+        v = super(FakeFiles, self).__getitem__(k)
+        return v() if callable(v) else v
+
 class PyHesiodFS(Fuse):
 
     def __init__(self, *args, **kwargs):
@@ -177,6 +202,7 @@ class PyHesiodFS(Fuse):
         
         # Dictionary of fake read-only file paths and their contents
         self.ro_files = {}
+        self.files = FakeFiles()
 
         self.syslog_unavail = True
         self.syslog_unknown = True
@@ -199,30 +225,21 @@ class PyHesiodFS(Fuse):
         self.show_attachtab = config.getboolean('PyHesiodFS', 'show_attachtab')
         self.show_readme = config.getboolean('PyHesiodFS', 'show_readme')
 
-        readme_filename = config.get('PyHesiodFS', 'readme_filename')
-        if len(readme_filename) < 1 or '/' in readme_filename:
-            syslog(LOG_WARNING, "Invalid value for 'readme_filename' in config file, disabling readme file")
-            self.show_readme = False
-        # Add the leading slash
-        readme_path = '/' + readme_filename
-        readme_contents = config.get('PyHesiodFS', 'readme_contents')
-        try:
-            readme_contents = readme_contents % {'mountpoint': self.mountpoint,
-                                                 'blank': ''}
-        except KeyError as e:
-            syslog(LOG_WARNING, "Unknown substitution key (%s) in readme_contents in config file, disabling readme file" % (e.message,))
-            self.show_readme = False
-
-        # Add a newline if the "file" doesn't end in it
-        if not readme_contents.endswith("\n"):
-            readme_contents += "\n"
-        if self.show_attachtab:
-            self.ro_files[ATTACHTAB_PATH] = self.mounts._legacyFormat
-
-        self.ro_files[ATTACHTAB_USER_PATH] = self.mounts.__str__
-
         if self.show_readme:
-            self.ro_files[readme_path] = readme_contents
+            try:
+                readme_contents = config.get('PyHesiodFS', 'readme_contents') + "\n"
+                self.files[config.get('PyHesiodFS', 'readme_filename')] = readme_contents % {'mountpoint': self.mountpoint,
+                                                                                             'blank': ''}
+            except ValueError as e:
+                syslog(LOG_WARNING,
+                       "config file: bad value for 'readme_filename'")
+            except KeyError as e:
+                syslog(LOG_WARNING,
+                       "config file: bad substitution key (%s) in 'readme_contents'" % (e.message,))
+
+        if self.show_attachtab:
+            self.files[LEGACY_ATTACHTAB_PATH] = self.mounts._legacyFormat
+        self.files[ATTACHTAB_PATH] = self.mounts.__str__
 
     def _get_file_contents(self, path):
         assert path in self.ro_files
@@ -245,10 +262,10 @@ class PyHesiodFS(Fuse):
             st.st_mode = stat.S_IFDIR | 0755
             st.st_gid = self._gid()
             st.st_nlink = 2
-        elif path in self.ro_files:
+        elif path in self.files:
             st.st_mode = stat.S_IFREG | 0444
             st.st_nlink = 1
-            st.st_size = len(self._get_file_contents(path))
+            st.st_size = len(self.files[path])
         elif path.startswith('/.'):
             # Avoid spurious Hesiod errors by not even bothering
             # to lookup things beginning with '.'
@@ -296,7 +313,7 @@ class PyHesiodFS(Fuse):
         return None
 
     def getdir(self, path):
-        return [(i, 0) for i in (['.', '..'] + [x[1:] for x in self.ro_files.keys()] + self.getCachedLockers())]
+        return [(i, 0) for i in (['.', '..'] + self.files.filenames() + self.getCachedLockers())]
 
     def readdir(self, path, offset):
         for (r, zero) in self.getdir(path):
@@ -306,16 +323,16 @@ class PyHesiodFS(Fuse):
         return self.findLocker(path[1:])
 
     def open(self, path, flags):
-        if path not in self.ro_files:
+        if path not in self.files:
             return -errno.ENOENT
         accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
         if (flags & accmode) != os.O_RDONLY:
             return -errno.EACCES
 
     def read(self, path, size, offset):
-        if path not in self.ro_files:
+        if path not in self.files:
             return -errno.ENOENT
-        contents = self._get_file_contents(path)
+        contents = self.files[path]
         slen = len(contents)
         if offset < slen:
             if offset + size > slen:
@@ -326,7 +343,7 @@ class PyHesiodFS(Fuse):
         return buf
 
     def symlink(self, src, path):
-        if path == '/' or path in self.ro_files:
+        if path == '/' or path in self.files:
             return -errno.EPERM
         elif '/' not in path[1:]:
             self.mounts[self._uid()][path[1:]] = src
@@ -335,7 +352,7 @@ class PyHesiodFS(Fuse):
             return -errno.EPERM
     
     def unlink(self, path):
-        if path == '/' or path in self.ro_files:
+        if path == '/' or path in self.files:
             return -errno.EPERM
         elif '/' not in path[1:]:
             del self.mounts[self._uid()][path[1:]]
